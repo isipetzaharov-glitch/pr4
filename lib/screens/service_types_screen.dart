@@ -2,8 +2,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_exceptions.dart';
 import '../models/service_type.dart';
-import '../repositories/persistent_service_type_repository.dart';
+import '../repositories/api_service_type_repository.dart';
 import 'service_type_form_screen.dart';
 
 class ServiceTypesScreen extends StatefulWidget {
@@ -16,6 +17,7 @@ class ServiceTypesScreen extends StatefulWidget {
 class _ServiceTypesScreenState extends State<ServiceTypesScreen> {
   List<ServiceType> _items = [];
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -25,16 +27,26 @@ class _ServiceTypesScreenState extends State<ServiceTypesScreen> {
 
   Future<void> _load() async {
     if (!mounted) return;
-    setState(() => _loading = true);
-
-    final repo = context.read<PersistentServiceTypeRepository>();
-    final list = await repo.getAll();
-
-    if (!mounted) return;
     setState(() {
-      _items = list;
-      _loading = false;
+      _loading = true;
+      _error = null;
     });
+
+    final repo = context.read<ApiServiceTypeRepository>();
+    try {
+      final list = await repo.getAll();
+      if (!mounted) return;
+      setState(() {
+        _items = list;
+        _loading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    }
   }
 
   Future<void> _openCreate() async {
@@ -53,13 +65,13 @@ class _ServiceTypesScreenState extends State<ServiceTypesScreen> {
   }
 
   Future<void> _tryDelete(ServiceType s) async {
-    final repo = context.read<PersistentServiceTypeRepository>();
+    final repo = context.read<ApiServiceTypeRepository>();
 
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Удалить услугу?'),
-        content: Text('Услуга «${s.name}» будет удалена из справочника.'),
+        content: Text('Услуга «${s.name}» будет удалена.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -72,14 +84,24 @@ class _ServiceTypesScreenState extends State<ServiceTypesScreen> {
         ],
       ),
     );
-    if (ok != true) return;
-    if (!mounted) return;
+    if (ok != true || !mounted) return;
 
-    await repo.delete(s.id);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Услуга удалена')));
-    await _load();
+    try {
+      await repo.delete(s.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Услуга удалена')));
+      await _load();
+    } on ConflictException catch (e) {
+      // 409: услуга используется в заказах.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 
   @override
@@ -97,6 +119,22 @@ class _ServiceTypesScreenState extends State<ServiceTypesScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                  const SizedBox(height: 8),
+                  Text(_error!),
+                  const SizedBox(height: 8),
+                  FilledButton(
+                    onPressed: _load,
+                    child: const Text('Повторить'),
+                  ),
+                ],
+              ),
+            )
           : _items.isEmpty
           ? const Center(
               child: Column(

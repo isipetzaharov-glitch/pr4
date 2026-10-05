@@ -2,10 +2,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_exceptions.dart';
 import '../models/master.dart';
 import '../models/order_query.dart';
+import '../repositories/api_master_repository.dart';
 import '../repositories/order_repository.dart';
-import '../repositories/persistent_master_repository.dart';
 import 'master_form_screen.dart';
 
 class MastersScreen extends StatefulWidget {
@@ -18,6 +19,7 @@ class MastersScreen extends StatefulWidget {
 class _MastersScreenState extends State<MastersScreen> {
   List<Master> _masters = [];
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -27,22 +29,33 @@ class _MastersScreenState extends State<MastersScreen> {
 
   Future<void> _load() async {
     if (!mounted) return;
-    setState(() => _loading = true);
-
-    final repo = context.read<PersistentMasterRepository>();
-    final list = await repo.getAll();
-
-    if (!mounted) return;
     setState(() {
-      _masters = list;
-      _loading = false;
+      _loading = true;
+      _error = null;
     });
+
+    final repo = context.read<ApiMasterRepository>();
+    try {
+      final list = await repo.getAll();
+      if (!mounted) return;
+      setState(() {
+        _masters = list;
+        _loading = false;
+      });
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.message;
+        _loading = false;
+      });
+    }
   }
 
   Future<void> _tryDelete(Master m) async {
     final ordersRepo = context.read<OrderRepository>();
-    final masterRepo = context.read<PersistentMasterRepository>();
+    final masterRepo = context.read<ApiMasterRepository>();
 
+    // Пункт 13 (ПР3): считаем связанные заказы.
     final page = await ordersRepo.find(
       const OrderQuery(size: 1000, includeDeleted: true),
     );
@@ -53,7 +66,7 @@ class _MastersScreenState extends State<MastersScreen> {
     if (linked > 0) {
       await showDialog<void>(
         context: context,
-        builder: (_) => AlertDialog(
+        builder: (dialogContext) => AlertDialog(
           title: const Text('Удаление невозможно'),
           content: Text(
             'На мастера «${m.fullName}» ссылаются $linked заказ(ов). '
@@ -61,7 +74,7 @@ class _MastersScreenState extends State<MastersScreen> {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(context),
+              onPressed: () => Navigator.of(dialogContext).pop(),
               child: const Text('Понятно'),
             ),
           ],
@@ -74,16 +87,16 @@ class _MastersScreenState extends State<MastersScreen> {
 
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('Удалить мастера?'),
         content: Text('Мастер «${m.fullName}» будет удалён.'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('Отмена'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Удалить'),
           ),
         ],
@@ -93,13 +106,21 @@ class _MastersScreenState extends State<MastersScreen> {
     if (ok != true) return;
     if (!mounted) return;
 
-    final rest = _masters.where((x) => x.id != m.id).toList();
-    await masterRepo.replaceAll(rest);
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Мастер удалён')));
-    await _load();
+    try {
+      await masterRepo.delete(m.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Мастер удалён')));
+      await _load();
+    } on ConflictException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    }
   }
 
   @override
@@ -122,6 +143,24 @@ class _MastersScreenState extends State<MastersScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
+          : _error != null
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                  const SizedBox(height: 8),
+                  Text(_error!),
+                  const SizedBox(height: 8),
+                  FilledButton(
+                    onPressed: _load,
+                    child: const Text('Повторить'),
+                  ),
+                ],
+              ),
+            )
+          : _masters.isEmpty
+          ? const Center(child: Text('Список мастеров пуст'))
           : ListView.separated(
               itemCount: _masters.length,
               separatorBuilder: (_, _) => const Divider(height: 1),

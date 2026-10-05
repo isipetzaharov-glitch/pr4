@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_exceptions.dart';
 import '../models/repair_order.dart';
 import '../repositories/order_repository.dart';
 import '../state/dictionaries_notifier.dart';
@@ -35,6 +36,10 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
   String? _loadError;
   bool _dirty = false;
 
+  /// Ошибки, пришедшие с сервера (422).
+  /// Ключи совпадают с именами полей модели.
+  Map<String, String> _serverErrors = {};
+
   @override
   void initState() {
     super.initState();
@@ -42,26 +47,31 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
   }
 
   Future<void> _load() async {
-    // Все context.read — ДО первого await
+    // context.read — ДО первого await
     final dict = context.read<DictionariesNotifier>();
     final repo = context.read<OrderRepository>();
 
     await dict.ensureLoaded();
 
     if (widget.isEditing) {
-      final order = await repo.findById(widget.id!);
-      if (!mounted) return;
-      if (order != null) {
-        _titleCtrl.text = order.title;
-        _vinCtrl.text = order.vin;
-        _yearCtrl.text = order.year.toString();
-        _costCtrl.text = order.cost.toStringAsFixed(0);
-        _clientId = order.clientId;
-        _masterId = order.masterId;
-        _serviceIds = [...order.serviceIds];
-        _status = order.status;
-      } else {
-        _loadError = 'Заказ не найден';
+      try {
+        final order = await repo.findById(widget.id!);
+        if (!mounted) return;
+        if (order != null) {
+          _titleCtrl.text = order.title;
+          _vinCtrl.text = order.vin;
+          _yearCtrl.text = order.year.toString();
+          _costCtrl.text = order.cost.toStringAsFixed(0);
+          _clientId = order.clientId;
+          _masterId = order.masterId;
+          _serviceIds = [...order.serviceIds];
+          _status = order.status;
+        } else {
+          _loadError = 'Заказ не найден';
+        }
+      } on ApiException catch (e) {
+        if (!mounted) return;
+        _loadError = e.message;
       }
     }
 
@@ -82,14 +92,13 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
     if (!_dirty) setState(() => _dirty = true);
   }
 
-  /// Единая точка возврата в список — работает через State.context,
-  /// поэтому линтер не ругается на use_build_context_synchronously.
   void _goBack() {
     if (!mounted) return;
     GoRouter.of(context).go('/orders');
   }
 
   Future<void> _save() async {
+    setState(() => _serverErrors = {});
     if (!_formKey.currentState!.validate()) return;
     if (_clientId == null) {
       _snack('Выберите клиента');
@@ -128,9 +137,22 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
       if (!mounted) return;
       _snack(widget.isEditing ? 'Изменения сохранены' : 'Заказ создан');
       _goBack();
-    } catch (e) {
+    } on ValidationException catch (e) {
+      // 422 — ошибки по полям. Разложим их рядом с соответствующими полями.
       if (!mounted) return;
-      _snack('Ошибка сохранения: $e');
+      setState(() => _serverErrors = e.errors);
+      _formKey.currentState!.validate();
+      _snack('Проверьте выделенные поля');
+    } on ConflictException catch (e) {
+      // 409 — уникальность, целостность и т.п.
+      if (!mounted) return;
+      _snack(e.message);
+    } on UnauthorizedException catch (e) {
+      if (!mounted) return;
+      _snack(e.message);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _snack(e.message);
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -191,8 +213,6 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
         if (didPop) return;
         final ok = await _confirmExit();
         if (!ok) return;
-        // Навигация через метод _goBack — использует State.context,
-        // поэтому use_build_context_synchronously не срабатывает.
         _goBack();
       },
       child: Scaffold(
@@ -213,9 +233,10 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
             children: [
               TextFormField(
                 controller: _titleCtrl,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Название работ *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['title'],
                 ),
                 validator: (v) {
                   final r = Validators.required(v, field: 'Название');
@@ -226,22 +247,31 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
               const SizedBox(height: 12),
               TextFormField(
                 controller: _vinCtrl,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'VIN *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['vin'],
                 ),
-                validator: Validators.vin,
+                validator: (v) {
+                  if (_serverErrors['vin'] != null) return _serverErrors['vin'];
+                  return Validators.vin(v);
+                },
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _yearCtrl,
                 keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Год выпуска *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['year'],
                 ),
-                validator: (v) =>
-                    Validators.intRange(v, 1970, 2100, field: 'Год'),
+                validator: (v) {
+                  if (_serverErrors['year'] != null) {
+                    return _serverErrors['year'];
+                  }
+                  return Validators.intRange(v, 1970, 2100, field: 'Год');
+                },
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -249,12 +279,17 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
                 keyboardType: const TextInputType.numberWithOptions(
                   decimal: true,
                 ),
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Стоимость, ₽ *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['cost'],
                 ),
-                validator: (v) =>
-                    Validators.positiveDouble(v, field: 'Стоимость'),
+                validator: (v) {
+                  if (_serverErrors['cost'] != null) {
+                    return _serverErrors['cost'];
+                  }
+                  return Validators.positiveDouble(v, field: 'Стоимость');
+                },
               ),
 
               const SizedBox(height: 16),
@@ -267,9 +302,10 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
 
               DropdownButtonFormField<int>(
                 initialValue: _clientId,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Клиент *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['clientId'],
                 ),
                 items: dict.clients
                     .map(
@@ -289,9 +325,10 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
 
               DropdownButtonFormField<int>(
                 initialValue: _masterId,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Мастер *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['masterId'],
                 ),
                 items: dict.masters
                     .map(
@@ -311,9 +348,14 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
 
               FormField<List<int>>(
                 initialValue: _serviceIds,
-                validator: (v) => (v == null || v.isEmpty)
-                    ? 'Выберите хотя бы одну услугу'
-                    : null,
+                validator: (v) {
+                  if (_serverErrors['serviceIds'] != null) {
+                    return _serverErrors['serviceIds'];
+                  }
+                  return (v == null || v.isEmpty)
+                      ? 'Выберите хотя бы одну услугу'
+                      : null;
+                },
                 builder: (field) {
                   return InputDecorator(
                     decoration: InputDecoration(
@@ -346,9 +388,10 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
 
               DropdownButtonFormField<String>(
                 initialValue: _status,
-                decoration: const InputDecoration(
+                decoration: InputDecoration(
                   labelText: 'Статус *',
-                  border: OutlineInputBorder(),
+                  border: const OutlineInputBorder(),
+                  errorText: _serverErrors['status'],
                 ),
                 items: const [
                   DropdownMenuItem(value: 'new', child: Text('Новый')),
@@ -366,6 +409,7 @@ class _OrderFormScreenState extends State<OrderFormScreen> {
               const SizedBox(height: 24),
 
               FilledButton.icon(
+                // Пункт 16: кнопка заблокирована во время сохранения.
                 onPressed: _saving ? null : _save,
                 icon: _saving
                     ? const SizedBox(

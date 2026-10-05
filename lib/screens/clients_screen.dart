@@ -71,7 +71,6 @@ class _ClientsScreenState extends State<ClientsScreen> {
           ],
         ),
       ),
-      // FAB «+» — создание клиента
       floatingActionButton: FloatingActionButton(
         tooltip: 'Новый клиент',
         onPressed: () => context.go('/clients/new'),
@@ -270,18 +269,20 @@ class _ClientsScreenState extends State<ClientsScreen> {
     );
   }
 
+  /// Диалог подтверждения с использованием dialogContext —
+  /// надёжно закрывает именно маршрут диалога.
   Future<bool?> _confirm(BuildContext context, String text) {
     return showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         content: Text(text),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('Отмена'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Да'),
           ),
         ],

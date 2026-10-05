@@ -1,11 +1,13 @@
+// lib/models/repair_order.dart
+
 class RepairOrder {
   final int id;
   final String title;
   final String vin;
   final int year;
   final int clientId; // many-to-one
-  final int masterId; // many-to-one (было serviceId/publisherId)
-  final List<int> serviceIds; // many-to-many (услуги)
+  final int masterId; // many-to-one
+  final List<int> serviceIds; // many-to-many
   final double cost;
   final String status;
   final DateTime? deletedAt;
@@ -51,6 +53,8 @@ class RepairOrder {
     );
   }
 
+  /// Формат для отправки на сервер (write-модель).
+  /// Отправляем только идентификаторы связей, не развёрнутые объекты.
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
@@ -64,18 +68,38 @@ class RepairOrder {
     'deletedAt': deletedAt?.toIso8601String(),
   };
 
-  factory RepairOrder.fromJson(Map<String, dynamic> json) => RepairOrder(
-    id: json['id'] as int? ?? 0,
-    title: json['title'] as String? ?? '',
-    vin: json['vin'] as String? ?? '',
-    year: json['year'] as int? ?? 0,
-    clientId: json['clientId'] as int? ?? 0,
-    masterId: json['masterId'] as int? ?? 0,
-    serviceIds: (json['serviceIds'] as List?)?.cast<int>() ?? const [],
-    cost: (json['cost'] as num?)?.toDouble() ?? 0,
-    status: json['status'] as String? ?? 'new',
-    deletedAt: json['deletedAt'] == null
-        ? null
-        : DateTime.tryParse(json['deletedAt'] as String),
-  );
+  /// Разбор ответа сервера. Устойчив к двум формам:
+  ///   - write-форма: clientId / masterId / serviceIds (числа/списки чисел),
+  ///   - read-форма: client / master / services (объекты/списки объектов).
+  /// Любое отсутствующее поле подменяется значением по умолчанию.
+  factory RepairOrder.fromJson(Map<String, dynamic> json) {
+    int parseId(dynamic v) {
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is Map) return (v['id'] as num?)?.toInt() ?? 0;
+      return 0;
+    }
+
+    List<int> parseIds(dynamic v) {
+      if (v is List) return v.map(parseId).toList();
+      return const [];
+    }
+
+    return RepairOrder(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      title: json['title'] as String? ?? '',
+      vin: json['vin'] as String? ?? '',
+      year: (json['year'] as num?)?.toInt() ?? 0,
+      clientId: parseId(json['client'] ?? json['clientId']),
+      masterId: parseId(json['master'] ?? json['masterId']),
+      serviceIds: json.containsKey('services')
+          ? parseIds(json['services'])
+          : parseIds(json['serviceIds']),
+      cost: (json['cost'] as num?)?.toDouble() ?? 0,
+      status: json['status'] as String? ?? 'new',
+      deletedAt: json['deletedAt'] == null
+          ? null
+          : DateTime.tryParse(json['deletedAt'] as String),
+    );
+  }
 }

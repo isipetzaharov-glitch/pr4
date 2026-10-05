@@ -1,7 +1,9 @@
+// lib/screens/client_form_screen.dart
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../core/api_exceptions.dart';
 import '../models/client.dart';
 import '../models/service_card.dart';
 import '../repositories/client_repository.dart';
@@ -25,13 +27,18 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
   final _phoneCtrl = TextEditingController();
   final _countryCtrl = TextEditingController();
 
-  // Поля билета (1-к-1)
   bool _hasCard = false;
   final _cardNumberCtrl = TextEditingController();
   String _discountCategory = 'обычный';
 
   bool _loading = true;
   bool _saving = false;
+
+  /// Ошибки с сервера (422) по полям.
+  Map<String, String> _serverErrors = {};
+
+  /// Локальная проверка уникальности email (предварительная, до сохранения).
+  String? _uniqueEmailError;
 
   @override
   void initState() {
@@ -40,22 +47,30 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
   }
 
   Future<void> _load() async {
+    final repo = context.read<ClientRepository>();
     if (widget.isEditing) {
-      final repo = context.read<ClientRepository>();
-      final c = await repo.findById(widget.id!);
-      if (c != null) {
-        _lastNameCtrl.text = c.lastName;
-        _firstNameCtrl.text = c.firstName;
-        _emailCtrl.text = c.email;
-        _phoneCtrl.text = c.phone;
-        _countryCtrl.text = c.country;
-        if (c.card != null) {
-          _hasCard = true;
-          _cardNumberCtrl.text = c.card!.number;
-          _discountCategory = c.card!.discountCategory;
+      try {
+        final c = await repo.findById(widget.id!);
+        if (!mounted) return;
+        if (c != null) {
+          _lastNameCtrl.text = c.lastName;
+          _firstNameCtrl.text = c.firstName;
+          _emailCtrl.text = c.email;
+          _phoneCtrl.text = c.phone;
+          _countryCtrl.text = c.country;
+          if (c.card != null) {
+            _hasCard = true;
+            _cardNumberCtrl.text = c.card!.number;
+            _discountCategory = c.card!.discountCategory;
+          }
         }
+      } on ApiException catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.message)));
       }
     }
+    if (!mounted) return;
     setState(() => _loading = false);
   }
 
@@ -71,17 +86,24 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
   }
 
   Future<void> _save() async {
-    // Ошибка уникальности email (п.12)
+    setState(() {
+      _serverErrors = {};
+      _uniqueEmailError = null;
+    });
+
     final repo = context.read<ClientRepository>();
     final email = _emailCtrl.text.trim();
-    final exists = await repo.emailExists(email, exceptId: widget.id);
-    if (exists) {
-      _formKey.currentState!.validate(); // обычная валидация
-      // Показать конкретную ошибку под полем email:
-      setState(() => _uniqueEmailError = 'Такой email уже используется');
-      return;
+
+    // Предварительная проверка уникальности email (пункт 12 ПР3).
+    try {
+      final exists = await repo.emailExists(email, exceptId: widget.id);
+      if (exists) {
+        setState(() => _uniqueEmailError = 'Такой email уже используется');
+        return;
+      }
+    } on ApiException {
+      // Сервер не поддерживает проверку — не блокируем, проверит 422/409.
     }
-    setState(() => _uniqueEmailError = null);
 
     if (!_formKey.currentState!.validate()) return;
 
@@ -107,19 +129,33 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
       } else {
         await repo.create(client);
       }
-      if (mounted) context.go('/clients');
+      if (!mounted) return;
+      context.go('/clients');
+    } on ValidationException catch (e) {
+      if (!mounted) return;
+      setState(() => _serverErrors = e.errors);
+      _formKey.currentState!.validate();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Проверьте выделенные поля')),
+      );
+    } on ConflictException catch (e) {
+      if (!mounted) return;
+      setState(() => _uniqueEmailError = e.message);
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
-
-  String? _uniqueEmailError;
 
   @override
   Widget build(BuildContext context) {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -133,11 +169,15 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
           children: [
             TextFormField(
               controller: _lastNameCtrl,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Фамилия *',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                errorText: _serverErrors['lastName'],
               ),
               validator: (v) {
+                if (_serverErrors['lastName'] != null) {
+                  return _serverErrors['lastName'];
+                }
                 final r = Validators.required(v, field: 'Фамилия');
                 if (r != null) return r;
                 return Validators.maxLength(v, 50, field: 'Фамилия');
@@ -146,11 +186,17 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
             const SizedBox(height: 12),
             TextFormField(
               controller: _firstNameCtrl,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Имя *',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                errorText: _serverErrors['firstName'],
               ),
-              validator: (v) => Validators.required(v, field: 'Имя'),
+              validator: (v) {
+                if (_serverErrors['firstName'] != null) {
+                  return _serverErrors['firstName'];
+                }
+                return Validators.required(v, field: 'Имя');
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
@@ -158,27 +204,45 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
               decoration: InputDecoration(
                 labelText: 'Email *',
                 border: const OutlineInputBorder(),
-                errorText: _uniqueEmailError,
+                // Сначала серверная ошибка, потом локальная уникальность.
+                errorText: _serverErrors['email'] ?? _uniqueEmailError,
               ),
-              validator: Validators.email,
+              validator: (v) {
+                if (_serverErrors['email'] != null) {
+                  return _serverErrors['email'];
+                }
+                return Validators.email(v);
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
               controller: _phoneCtrl,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Телефон *',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                errorText: _serverErrors['phone'],
               ),
-              validator: Validators.phone,
+              validator: (v) {
+                if (_serverErrors['phone'] != null) {
+                  return _serverErrors['phone'];
+                }
+                return Validators.phone(v);
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
               controller: _countryCtrl,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Страна *',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                errorText: _serverErrors['country'],
               ),
-              validator: (v) => Validators.required(v, field: 'Страна'),
+              validator: (v) {
+                if (_serverErrors['country'] != null) {
+                  return _serverErrors['country'];
+                }
+                return Validators.required(v, field: 'Страна');
+              },
             ),
 
             const SizedBox(height: 16),
@@ -222,7 +286,13 @@ class _ClientFormScreenState extends State<ClientFormScreen> {
             const SizedBox(height: 24),
             FilledButton.icon(
               onPressed: _saving ? null : _save,
-              icon: const Icon(Icons.save),
+              icon: _saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.save),
               label: Text(widget.isEditing ? 'Сохранить' : 'Создать'),
             ),
           ],

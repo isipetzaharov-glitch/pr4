@@ -1,3 +1,4 @@
+// lib/models/client.dart
 import 'service_card.dart';
 
 class Client {
@@ -7,7 +8,7 @@ class Client {
   final String email;
   final String phone;
   final String country;
-  final ServiceCard? card; // ← связь 1-к-1
+  final ServiceCard? card; // связь 1-к-1
   final DateTime? deletedAt;
 
   const Client({
@@ -58,18 +59,26 @@ class Client {
     'deletedAt': deletedAt?.toIso8601String(),
   };
 
-  factory Client.fromJson(Map<String, dynamic> json) => Client(
-    id: json['id'] as int? ?? 0,
-    lastName: json['lastName'] as String? ?? '',
-    firstName: json['firstName'] as String? ?? '',
-    email: json['email'] as String? ?? '',
-    phone: json['phone'] as String? ?? '',
-    country: json['country'] as String? ?? '',
-    card: json['card'] == null
-        ? null
-        : ServiceCard.fromJson(json['card'] as Map<String, dynamic>),
-    deletedAt: json['deletedAt'] == null
-        ? null
-        : DateTime.tryParse(json['deletedAt'] as String),
-  );
+  factory Client.fromJson(Map<String, dynamic> json) {
+    // card может прийти как вложенный объект, как null,
+    // или отсутствовать в ответе вовсе.
+    final rawCard = json['card'];
+
+    return Client(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      lastName: json['lastName'] as String? ?? '',
+      firstName: json['firstName'] as String? ?? '',
+      email: json['email'] as String? ?? '',
+      phone: json['phone'] as String? ?? '',
+      country: json['country'] as String? ?? '',
+      card: rawCard is Map<String, dynamic>
+          ? ServiceCard.fromJson(rawCard)
+          : (rawCard is Map
+                ? ServiceCard.fromJson(Map<String, dynamic>.from(rawCard))
+                : null),
+      deletedAt: json['deletedAt'] == null
+          ? null
+          : DateTime.tryParse(json['deletedAt'] as String),
+    );
+  }
 }

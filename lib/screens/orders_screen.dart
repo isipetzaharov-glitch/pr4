@@ -373,18 +373,21 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
 
+  /// Диалог подтверждения с использованием dialogContext —
+  /// это гарантирует закрытие именно маршрута диалога,
+  /// даже если он уже был закрыт по Esc или клику вне его области.
   Future<bool?> _confirm(BuildContext context, String text) {
     return showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         content: Text(text),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
             child: const Text('Отмена'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Да'),
           ),
         ],

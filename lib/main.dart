@@ -1,15 +1,17 @@
 // lib/main.dart
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'core/api_client.dart';
+import 'repositories/api_client_repository.dart';
+import 'repositories/api_master_repository.dart';
+import 'repositories/api_repair_order_repository.dart';
+import 'repositories/api_service_type_repository.dart';
 import 'repositories/client_repository.dart';
 import 'repositories/order_repository.dart';
-import 'repositories/persistent_client_repository.dart';
-import 'repositories/persistent_master_repository.dart';
-import 'repositories/persistent_repair_order_repository.dart';
-import 'repositories/persistent_service_type_repository.dart';
 import 'screens/app_shell.dart';
 import 'screens/client_details_screen.dart';
 import 'screens/client_form_screen.dart';
@@ -27,26 +29,31 @@ import 'state/order_list_notifier.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final prefs = await SharedPreferences.getInstance();
+  // SharedPreferences оставляем — пригодится для токена и настроек,
+  // сами данные теперь живут на сервере.
+  await SharedPreferences.getInstance();
 
   runApp(
     MultiProvider(
       providers: [
-        Provider<SharedPreferences>.value(value: prefs),
+        // Единственный Dio на всё приложение — с интерсепторами.
+        Provider<Dio>(create: (_) => buildDio()),
 
-        Provider<OrderRepository>(
-          create: (_) => PersistentRepairOrderRepository(prefs),
+        // ---- Репозитории через API ----
+        ProxyProvider<Dio, OrderRepository>(
+          update: (_, dio, _) => ApiRepairOrderRepository(dio),
         ),
-        Provider<ClientRepository>(
-          create: (_) => PersistentClientRepository(prefs),
+        ProxyProvider<Dio, ClientRepository>(
+          update: (_, dio, _) => ApiClientRepository(dio),
         ),
-        Provider<PersistentMasterRepository>(
-          create: (_) => PersistentMasterRepository(prefs),
+        ProxyProvider<Dio, ApiMasterRepository>(
+          update: (_, dio, _) => ApiMasterRepository(dio),
         ),
-        Provider<PersistentServiceTypeRepository>(
-          create: (_) => PersistentServiceTypeRepository(prefs),
+        ProxyProvider<Dio, ApiServiceTypeRepository>(
+          update: (_, dio, _) => ApiServiceTypeRepository(dio),
         ),
 
+        // ---- Состояния ----
         ChangeNotifierProvider(
           create: (ctx) => OrderListNotifier(ctx.read<OrderRepository>()),
         ),
@@ -56,8 +63,8 @@ void main() async {
         ChangeNotifierProvider(
           create: (ctx) => DictionariesNotifier(
             ctx.read<ClientRepository>(),
-            ctx.read<PersistentMasterRepository>(),
-            ctx.read<PersistentServiceTypeRepository>(),
+            ctx.read<ApiMasterRepository>(),
+            ctx.read<ApiServiceTypeRepository>(),
           ),
         ),
       ],
