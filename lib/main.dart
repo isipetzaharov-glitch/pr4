@@ -1,59 +1,72 @@
 // lib/main.dart
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/api_client.dart';
+import 'core/auth_api.dart';
 import 'repositories/api_client_repository.dart';
 import 'repositories/api_master_repository.dart';
 import 'repositories/api_repair_order_repository.dart';
 import 'repositories/api_service_type_repository.dart';
 import 'repositories/client_repository.dart';
 import 'repositories/order_repository.dart';
-import 'screens/app_shell.dart';
-import 'screens/client_details_screen.dart';
-import 'screens/client_form_screen.dart';
-import 'screens/clients_screen.dart';
-import 'screens/master_form_screen.dart';
-import 'screens/masters_screen.dart';
-import 'screens/order_details_screen.dart';
-import 'screens/order_form_screen.dart';
-import 'screens/orders_screen.dart';
-import 'screens/service_type_form_screen.dart';
-import 'screens/service_types_screen.dart';
+import 'router.dart';
+import 'state/auth_notifier.dart';
 import 'state/client_list_notifier.dart';
 import 'state/dictionaries_notifier.dart';
 import 'state/order_list_notifier.dart';
+import 'widgets/inactivity_watcher.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // SharedPreferences оставляем — пригодится для токена и настроек,
-  // сами данные теперь живут на сервере.
-  await SharedPreferences.getInstance();
+  usePathUrlStrategy();
+
+  final prefs = await SharedPreferences.getInstance();
+
+  late AuthNotifier auth;
+  late AuthApi authApi;
+
+  final dio = buildDio(
+    tokenProvider: () => auth.accessToken,
+    refreshHandler: () async {
+      try {
+        await auth.refreshTokens();
+        return true;
+      } catch (_) {
+        await auth.logout();
+        return false;
+      }
+    },
+  );
+
+  authApi = AuthApi(dio);
+  auth = AuthNotifier(prefs, authApi);
+  await auth.restore();
 
   runApp(
     MultiProvider(
       providers: [
-        // Единственный Dio на всё приложение — с интерсепторами.
-        Provider<Dio>(create: (_) => buildDio()),
+        Provider<SharedPreferences>.value(value: prefs),
+        Provider<Dio>.value(value: dio),
+        Provider<AuthApi>.value(value: authApi),
+        ChangeNotifierProvider<AuthNotifier>.value(value: auth),
 
-        // ---- Репозитории через API ----
         ProxyProvider<Dio, OrderRepository>(
-          update: (_, dio, _) => ApiRepairOrderRepository(dio),
+          update: (_, d, _) => ApiRepairOrderRepository(d),
         ),
         ProxyProvider<Dio, ClientRepository>(
-          update: (_, dio, _) => ApiClientRepository(dio),
+          update: (_, d, _) => ApiClientRepository(d),
         ),
         ProxyProvider<Dio, ApiMasterRepository>(
-          update: (_, dio, _) => ApiMasterRepository(dio),
+          update: (_, d, _) => ApiMasterRepository(d),
         ),
         ProxyProvider<Dio, ApiServiceTypeRepository>(
-          update: (_, dio, _) => ApiServiceTypeRepository(dio),
+          update: (_, d, _) => ApiServiceTypeRepository(d),
         ),
 
-        // ---- Состояния ----
         ChangeNotifierProvider(
           create: (ctx) => OrderListNotifier(ctx.read<OrderRepository>()),
         ),
@@ -78,94 +91,39 @@ class AutoServiceApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthNotifier>();
+    final router = buildRouter(auth);
+
     return MaterialApp.router(
       title: 'Автосервис',
       theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
-      routerConfig: _router,
+      routerConfig: router,
+      builder: (context, child) {
+        final content = child ?? const SizedBox.shrink();
+        if (!auth.isAuthenticated) return content;
+
+        return InactivityWatcher(
+          timeout: const Duration(minutes: 3),
+          warningBefore: const Duration(seconds: 30),
+          onWarning: () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Сессия завершится через 30 секунд без активности',
+                ),
+                duration: Duration(seconds: 5),
+              ),
+            );
+          },
+          onTimeout: () async {
+            // Только выход. Роутер сам редиректит на /login,
+            // потому что auth.isAuthenticated станет false
+            // и сработает refreshListenable.
+            await auth.logout();
+          },
+          child: content,
+        );
+      },
     );
   }
 }
-
-final _router = GoRouter(
-  initialLocation: '/orders',
-  routes: [
-    ShellRoute(
-      builder: (context, state, child) => AppShell(child: child),
-      routes: [
-        // ------------------ Заказы ------------------
-        GoRoute(
-          path: '/orders',
-          builder: (context, state) =>
-              OrdersScreen(urlParams: state.uri.queryParameters),
-          routes: [
-            GoRoute(path: 'new', builder: (_, _) => const OrderFormScreen()),
-            GoRoute(
-              path: ':id/edit',
-              builder: (_, s) => OrderFormScreen(
-                id: int.tryParse(s.pathParameters['id'] ?? ''),
-              ),
-            ),
-            GoRoute(
-              path: ':id',
-              builder: (_, s) =>
-                  OrderDetailsScreen(id: int.parse(s.pathParameters['id']!)),
-            ),
-          ],
-        ),
-
-        // ------------------ Клиенты ------------------
-        GoRoute(
-          path: '/clients',
-          builder: (context, state) => const ClientsScreen(),
-          routes: [
-            GoRoute(path: 'new', builder: (_, _) => const ClientFormScreen()),
-            GoRoute(
-              path: ':id/edit',
-              builder: (_, s) => ClientFormScreen(
-                id: int.tryParse(s.pathParameters['id'] ?? ''),
-              ),
-            ),
-            GoRoute(
-              path: ':id',
-              builder: (_, s) =>
-                  ClientDetailsScreen(id: int.parse(s.pathParameters['id']!)),
-            ),
-          ],
-        ),
-
-        // ------------------ Мастера ------------------
-        GoRoute(
-          path: '/masters',
-          builder: (_, _) => const MastersScreen(),
-          routes: [
-            GoRoute(path: 'new', builder: (_, _) => const MasterFormScreen()),
-            GoRoute(
-              path: ':id/edit',
-              builder: (_, s) => MasterFormScreen(
-                id: int.tryParse(s.pathParameters['id'] ?? ''),
-              ),
-            ),
-          ],
-        ),
-
-        // ------------------ Услуги ------------------
-        GoRoute(
-          path: '/services',
-          builder: (_, _) => const ServiceTypesScreen(),
-          routes: [
-            GoRoute(
-              path: 'new',
-              builder: (_, _) => const ServiceTypeFormScreen(),
-            ),
-            GoRoute(
-              path: ':id/edit',
-              builder: (_, s) => ServiceTypeFormScreen(
-                id: int.tryParse(s.pathParameters['id'] ?? ''),
-              ),
-            ),
-          ],
-        ),
-      ],
-    ),
-  ],
-);

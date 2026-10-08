@@ -5,25 +5,28 @@ import 'package:flutter/foundation.dart';
 import 'api_exceptions.dart';
 import 'config.dart';
 
-/// Собирает Dio с базовыми настройками, интерсептором логирования
-/// и повтором запросов при сетевом сбое.
-Dio buildDio({String? Function()? tokenProvider}) {
+typedef TokenProvider = String? Function();
+typedef RefreshHandler = Future<bool> Function();
+
+/// Собирает Dio с базовыми настройками, интерсепторами логирования,
+/// авторизации и повтора.
+Dio buildDio({TokenProvider? tokenProvider, RefreshHandler? refreshHandler}) {
   final dio = Dio(
     BaseOptions(
       baseUrl: apiBaseUrl,
       connectTimeout: const Duration(seconds: 10),
       receiveTimeout: const Duration(seconds: 15),
       headers: {'Content-Type': 'application/json'},
-      // 4xx пропускаем в onResponse — разберём сами.
       validateStatus: (status) => status != null && status < 500,
     ),
   );
 
+  // Основной интерсептор: лог, авторизация, обработка 4xx.
   dio.interceptors.add(
     InterceptorsWrapper(
       onRequest: (options, handler) {
         final token = tokenProvider?.call();
-        if (token != null) {
+        if (token != null && token.isNotEmpty) {
           options.headers['Authorization'] = 'Bearer $token';
         }
         if (kDebugMode) {
@@ -49,7 +52,7 @@ Dio buildDio({String? Function()? tokenProvider}) {
         }
         return handler.next(response);
       },
-      onError: (error, handler) {
+      onError: (error, handler) async {
         if (kDebugMode) {
           debugPrint('[API ✗] ${error.requestOptions.uri} — ${error.type}');
         }
@@ -58,16 +61,55 @@ Dio buildDio({String? Function()? tokenProvider}) {
     ),
   );
 
-  // Пункт 14: повтор только для GET при сетевом сбое.
+  // Интерсептор 401 → refresh → повтор запроса.
+  dio.interceptors.add(
+    _RefreshInterceptor(dio: dio, refreshHandler: refreshHandler),
+  );
+
+  // Пункт 14 ПР4: retry для GET при сетевом сбое.
   dio.interceptors.add(RetryInterceptor(dio));
 
   return dio;
 }
 
-/// Повтор операций чтения при сетевых сбоях.
-///
-/// Создание/изменение/удаление НЕ повторяется: нельзя гарантировать
-/// идемпотентность на сервере без специальных заголовков.
+class _RefreshInterceptor extends Interceptor {
+  final Dio dio;
+  final RefreshHandler? refreshHandler;
+
+  _RefreshInterceptor({required this.dio, this.refreshHandler});
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) async {
+    final status = err.response?.statusCode;
+    final path = err.requestOptions.path;
+
+    // Не трогаем сами эндпоинты аутентификации — иначе бесконечный цикл.
+    final isAuthCall = path.contains('/auth/');
+
+    if (status == 401 && !isAuthCall && refreshHandler != null) {
+      final ok = await refreshHandler!.call();
+      if (ok) {
+        try {
+          final options = err.requestOptions;
+          // Заголовок Authorization обновится в onRequest,
+          // но если интерсептор чтения токена ещё не сработал,
+          // проставим вручную.
+          final token = options.headers['Authorization'];
+          if (kDebugMode) {
+            debugPrint('[API ↻] повтор запроса с токеном: $token');
+          }
+          final response = await dio.fetch(options);
+          return handler.resolve(response);
+        } on DioException catch (e) {
+          return handler.next(e);
+        }
+      }
+    }
+    return handler.next(err);
+  }
+}
+
+/// Повтор операций чтения при сетевых сбоях (из ПР4).
 class RetryInterceptor extends Interceptor {
   final Dio dio;
   final int maxAttempts;
@@ -81,14 +123,12 @@ class RetryInterceptor extends Interceptor {
         err.type == DioExceptionType.connectionError ||
         err.type == DioExceptionType.connectionTimeout ||
         err.type == DioExceptionType.receiveTimeout;
-
     final attempt = (err.requestOptions.extra['retryAttempt'] as int?) ?? 0;
 
     if (!isRead || !isNetwork || attempt >= maxAttempts) {
       return handler.next(err);
     }
 
-    // Нарастающая пауза: 300, 600, 1200 мс.
     final delay = Duration(milliseconds: 300 * (1 << attempt));
     await Future.delayed(delay);
 
